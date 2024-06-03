@@ -27,6 +27,9 @@ You can get started with Pipecat running on your local machine, then move your a
 # install the module
 pip install pipecat-ai
 
+# install from github case
+#pip install git+https://github.com/sellpath/pipecat.git@main
+
 # set up an .env file with API keys
 cp dot-env.template .env
 ```
