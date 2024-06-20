@@ -4,17 +4,18 @@
 # SPDX-License-Identifier: BSD 2-Clause License
 #
 
-import io
-import json
-import time
 import aiohttp
 import base64
+import io
+import json
 
+from typing import Any, AsyncGenerator, List, Literal
+
+from loguru import logger
 from PIL import Image
 
-from typing import AsyncGenerator, List, Literal
-
 from pipecat.frames.frames import (
+    AudioRawFrame,
     ErrorFrame,
     Frame,
     LLMFullResponseEndFrame,
@@ -26,17 +27,20 @@ from pipecat.frames.frames import (
     URLImageRawFrame,
     VisionImageRawFrame
 )
-from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext, OpenAILLMContextFrame
+from pipecat.processors.aggregators.openai_llm_context import (
+    OpenAILLMContext,
+    OpenAILLMContextFrame
+)
 from pipecat.processors.frame_processor import FrameDirection
-from pipecat.services.ai_services import LLMService, ImageGenService
-
-from loguru import logger
+from pipecat.services.ai_services import (
+    ImageGenService,
+    LLMService,
+    TTSService
+)
 
 try:
-    from openai import AsyncOpenAI, AsyncStream
-
+    from openai import AsyncOpenAI, AsyncStream, BadRequestError
     from openai.types.chat import (
-        ChatCompletion,
         ChatCompletionChunk,
         ChatCompletionFunctionMessageParam,
         ChatCompletionMessageParam,
@@ -63,17 +67,32 @@ class BaseOpenAILLMService(LLMService):
     calls from the LLM.
     """
 
-    def __init__(self, model: str, api_key=None, base_url=None):
-        super().__init__()
+    def __init__(self, model: str, api_key=None, base_url=None, **kwargs):
+        super().__init__(**kwargs)
         self._model: str = model
-        self._client = self.create_client(api_key=api_key, base_url=base_url)
+        self._client = self.create_client(api_key=api_key, base_url=base_url, **kwargs)
 
-    def create_client(self, api_key=None, base_url=None):
+    def create_client(self, api_key=None, base_url=None, **kwargs):
         return AsyncOpenAI(api_key=api_key, base_url=base_url)
 
+    def can_generate_metrics(self) -> bool:
+        return True
+
+    async def get_chat_completions(
+            self,
+            context: OpenAILLMContext,
+            messages: List[ChatCompletionMessageParam]) -> AsyncStream[ChatCompletionChunk]:
+        chunks = await self._client.chat.completions.create(
+            model=self._model,
+            stream=True,
+            messages=messages,
+            tools=context.tools,
+            tool_choice=context.tool_choice,
+        )
+        return chunks
+
     async def _stream_chat_completions(
-        self, context: OpenAILLMContext
-    ) -> AsyncStream[ChatCompletionChunk]:
+            self, context: OpenAILLMContext) -> AsyncStream[ChatCompletionChunk]:
         logger.debug(f"Generating chat: {context.get_messages_json()}")
 
         messages: List[ChatCompletionMessageParam] = context.get_messages()
@@ -90,34 +109,19 @@ class BaseOpenAILLMService(LLMService):
                 del message["data"]
                 del message["mime_type"]
 
-        start_time = time.time()
-        chunks: AsyncStream[ChatCompletionChunk] = (
-            await self._client.chat.completions.create(
-                model=self._model,
-                stream=True,
-                messages=messages,
-                tools=context.tools,
-                tool_choice=context.tool_choice,
-            )
-        )
-
-        logger.debug(f"OpenAI LLM TTFB: {time.time() - start_time}")
+        try:
+            chunks = await self.get_chat_completions(context, messages)
+        except Exception as e:
+            logger.error(f"{self} exception: {e}")
 
         return chunks
-
-    async def _chat_completions(self, messages) -> str | None:
-        response: ChatCompletion = await self._client.chat.completions.create(
-            model=self._model, stream=False, messages=messages
-        )
-        if response and len(response.choices) > 0:
-            return response.choices[0].message.content
-        else:
-            return None
 
     async def _process_context(self, context: OpenAILLMContext):
         function_name = ""
         arguments = ""
         tool_call_id = ""
+
+        await self.start_ttfb_metrics()
 
         chunk_stream: AsyncStream[ChatCompletionChunk] = (
             await self._stream_chat_completions(context)
@@ -126,6 +130,8 @@ class BaseOpenAILLMService(LLMService):
         async for chunk in chunk_stream:
             if len(chunk.choices) == 0:
                 continue
+
+            await self.stop_ttfb_metrics()
 
             if chunk.choices[0].delta.tool_calls:
                 # We're streaming the LLM response to enable the fastest response times.
@@ -211,6 +217,8 @@ class BaseOpenAILLMService(LLMService):
             raise BaseException(f"Unknown return type from function callback: {type(result)}")
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         context = None
         if isinstance(frame, OpenAILLMContextFrame):
             context: OpenAILLMContext = frame.context
@@ -262,7 +270,7 @@ class OpenAIImageGenService(ImageGenService):
         image_url = image.data[0].url
 
         if not image_url:
-            logger.error(f"No image provided in response: {image}")
+            logger.error(f"{self} No image provided in response: {image}")
             yield ErrorFrame("Image generation failed")
             return
 
@@ -272,3 +280,58 @@ class OpenAIImageGenService(ImageGenService):
             image = Image.open(image_stream)
             frame = URLImageRawFrame(image_url, image.tobytes(), image.size, image.format)
             yield frame
+
+
+class OpenAITTSService(TTSService):
+    """This service uses the OpenAI TTS API to generate audio from text.
+    The returned audio is PCM encoded at 24kHz. When using the DailyTransport, set the sample rate in the DailyParams accordingly:
+    ```
+    DailyParams(
+        audio_out_enabled=True,
+        audio_out_sample_rate=24_000,
+    )
+    ```
+    """
+
+    def __init__(
+            self,
+            *,
+            api_key: str | None = None,
+            voice: Literal["alloy", "echo", "fable", "onyx", "nova", "shimmer"] = "alloy",
+            model: Literal["tts-1", "tts-1-hd"] = "tts-1",
+            **kwargs):
+        super().__init__(**kwargs)
+
+        self._voice = voice
+        self._model = model
+
+        self._client = AsyncOpenAI(api_key=api_key)
+
+    def can_generate_metrics(self) -> bool:
+        return True
+
+    async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
+        logger.debug(f"Generating TTS: [{text}]")
+
+        try:
+            await self.start_ttfb_metrics()
+
+            async with self._client.audio.speech.with_streaming_response.create(
+                    input=text,
+                    model=self._model,
+                    voice=self._voice,
+                    response_format="pcm",
+            ) as r:
+                if r.status_code != 200:
+                    error = await r.text()
+                    logger.error(
+                        f"{self} error getting audio (status: {r.status_code}, error: {error})")
+                    yield ErrorFrame(f"Error getting audio (status: {r.status_code}, error: {error})")
+                    return
+                async for chunk in r.iter_bytes(8192):
+                    if len(chunk) > 0:
+                        await self.stop_ttfb_metrics()
+                        frame = AudioRawFrame(chunk, 24_000, 1)
+                        yield frame
+        except BadRequestError as e:
+            logger.error(f"{self} error generating TTS: {e}")

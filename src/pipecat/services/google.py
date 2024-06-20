@@ -1,8 +1,10 @@
+#
+# Copyright (c) 2024, Daily
+#
+# SPDX-License-Identifier: BSD 2-Clause License
+#
 
-import json
-import os
 import asyncio
-import time
 
 from typing import List
 
@@ -45,6 +47,9 @@ class GoogleLLMService(LLMService):
         gai.configure(api_key=api_key)
         self._client = gai.GenerativeModel(model)
 
+    def can_generate_metrics(self) -> bool:
+        return True
+
     def _get_messages_from_openai_context(
             self, context: OpenAILLMContext) -> List[glm.Content]:
         openai_messages = context.get_messages()
@@ -81,9 +86,11 @@ class GoogleLLMService(LLMService):
 
             messages = self._get_messages_from_openai_context(context)
 
-            start_time = time.time()
+            await self.start_ttfb_metrics()
+
             response = self._client.generate_content(messages, stream=True)
-            logger.debug(f"Google LLM TTFB: {time.time() - start_time}")
+
+            await self.stop_ttfb_metrics()
 
             async for chunk in self._async_generator_wrapper(response):
                 try:
@@ -97,14 +104,16 @@ class GoogleLLMService(LLMService):
                         logger.debug(
                             f"LLM refused to generate content for safety reasons - {messages}.")
                     else:
-                        logger.error(f"Error {e}")
+                        logger.error(f"{self} error: {e}")
 
         except Exception as e:
-            logger.error(f"Exception: {e}")
+            logger.error(f"{self} exception: {e}")
         finally:
             await self.push_frame(LLMFullResponseEndFrame())
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         context = None
 
         if isinstance(frame, OpenAILLMContextFrame):

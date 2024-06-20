@@ -5,6 +5,163 @@ All notable changes to **pipecat** will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- Added new `AzureSTTService`. This allows you to use Azure Speech-To-Text.
+
+### Other
+
+- Updated `07f-interruptible-azure.py` to use `AzureLLMService`,
+  `AzureSTTService` and `AzureTTSService`.
+
+## [0.0.31] - 2024-06-13
+
+### Performance
+
+- Break long audio frames into 20ms chunks instead of 10ms.
+
+## [0.0.30] - 2024-06-13
+
+### Added
+
+- Added `report_only_initial_ttfb` to `PipelineParams`. This will make it so
+  only the initial TTFB metrics after the user stops talking are reported.
+
+- Added `OpenPipeLLMService`. This service will let you run OpenAI through
+  OpenPipe's SDK.
+
+- Allow specifying frame processors' name through a new `name` constructor
+  argument.
+
+- Added `DeepgramSTTService`. This service has an ongoing websocket
+  connection. To handle this, it subclasses `AIService` instead of
+  `STTService`. The output of this service will be pushed from the same task,
+  except system frames like `StartFrame`, `CancelFrame` or
+  `StartInterruptionFrame`.
+
+### Changed
+
+- `FrameSerializer.deserialize()` can now return `None` in case it is not
+  possible to desearialize the given data.
+
+- `daily_rest.DailyRoomProperties` now allows extra unknown parameters.
+
+### Fixed
+
+- Fixed an issue where `DailyRoomProperties.exp` always had the same old
+  timestamp unless set by the user.
+
+- Fixed a couple of issues with `WebsocketServerTransport`. It needed to use
+  `push_audio_frame()` and also VAD was not working properly.
+
+- Fixed an issue that would cause LLM aggregator to fail with small
+  `VADParams.stop_secs` values.
+
+- Fixed an issue where `BaseOutputTransport` would send longer audio frames
+  preventing interruptions.
+
+### Other
+
+- Added new `07h-interruptible-openpipe.py` example. This example shows how to
+  use OpenPipe to run OpenAI LLMs and get the logs stored in OpenPipe.
+
+- Added new `dialin-chatbot` example. This examples shows how to call the bot
+  using a phone number.
+
+## [0.0.29] - 2024-06-07
+
+### Added
+
+- Added a new `FunctionFilter`. This filter will let you filter frames based on
+  a given function, except system messages which should never be filtered.
+
+- Added `FrameProcessor.can_generate_metrics()` method to indicate if a
+  processor can generate metrics. In the future this might get an extra argument
+  to ask for a specific type of metric.
+
+- Added `BasePipeline`. All pipeline classes should be based on this class. All
+  subclasses should implement a `processors_with_metrics()` method that returns
+  a list of all `FrameProcessor`s in the pipeline that can generate metrics.
+
+- Added `enable_metrics` to `PipelineParams`.
+
+- Added `MetricsFrame`. The `MetricsFrame` will report different metrics in the
+  system. Right now, it can report TTFB (Time To First Byte) values for
+  different services, that is the time spent between the arrival of a `Frame` to
+  the processor/service until the first `DataFrame` is pushed downstream. If
+  metrics are enabled an intial `MetricsFrame` with all the services in the
+  pipeline will be sent.
+
+- Added TTFB metrics and debug logging for TTS services.
+
+### Changed
+
+- Moved `ParallelTask` to `pipecat.pipeline.parallel_task`.
+
+### Fixed
+
+- Fixed PlayHT TTS service to work properly async.
+
+## [0.0.28] - 2024-06-05
+
+### Fixed
+
+- Fixed an issue with `SileroVADAnalyzer` that would cause memory to keep
+  growing indefinitely.
+
+## [0.0.27] - 2024-06-05
+
+### Added
+
+- Added `DailyTransport.participants()` and `DailyTransport.participant_counts()`.
+
+## [0.0.26] - 2024-06-05
+
+### Added
+
+- Added `OpenAITTSService`.
+
+- Allow passing `output_format` and `model_id` to `CartesiaTTSService` to change
+  audio sample format and the model to use.
+
+- Added `DailyRESTHelper` which helps you create Daily rooms and tokens in an
+  easy way.
+
+- `PipelineTask` now has a `has_finished()` method to indicate if the task has
+  completed. If a task is never ran `has_finished()` will return False.
+
+- `PipelineRunner` now supports SIGTERM. If received, the runner will be
+  canceled.
+
+### Fixed
+
+- Fixed an issue where `BaseInputTransport` and `BaseOutputTransport` where
+  stopping push tasks before pushing `EndFrame` frames could cause the bots to
+  get stuck.
+
+- Fixed an error closing local audio transports.
+
+- Fixed an issue with Deepgram TTS that was introduced in the previous release.
+
+- Fixed `AnthropicLLMService` interruptions. If an interruption occurred, a
+  `user` message could be appended after the previous `user` message. Anthropic
+  does not allow that because it requires alternate `user` and `assistant`
+  messages.
+
+### Performance
+
+- The `BaseInputTransport` does not pull audio frames from sub-classes any
+  more. Instead, sub-classes now push audio frames into a queue in the base
+  class. Also, `DailyInputTransport` now pushes audio frames every 20ms instead
+  of 10ms.
+
+- Remove redundant camera input thread from `DailyInputTransport`. This should
+  improve performance a little bit when processing participant videos.
+
+- Load Cartesia voice on startup.
+
 ## [0.0.25] - 2024-05-31
 
 ### Added

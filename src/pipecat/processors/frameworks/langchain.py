@@ -39,6 +39,8 @@ class LangchainProcessor(FrameProcessor):
         self._participant_id = participant_id
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         if isinstance(frame, LLMMessagesFrame):
             # Messages are accumulated by the `LLMUserResponseAggregator` in a list of messages.
             # The last one by the human is the one we want to send to the LLM.
@@ -71,7 +73,7 @@ class LangchainProcessor(FrameProcessor):
                 await self.push_frame(TextFrame(self.__get_token_value(token)))
                 await self.push_frame(LLMResponseEndFrame())
         except GeneratorExit:
-            logger.warning("Generator was closed prematurely")
+            logger.warning(f"{self} generator was closed prematurely")
         except Exception as e:
-            logger.error(f"An unknown error occurred: {e}")
+            logger.error(f"{self} an unknown error occurred: {e}")
         await self.push_frame(LLMFullResponseEndFrame())

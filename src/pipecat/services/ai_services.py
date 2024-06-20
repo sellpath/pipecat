@@ -16,6 +16,7 @@ from pipecat.frames.frames import (
     EndFrame,
     ErrorFrame,
     Frame,
+    StartFrame,
     TTSStartedFrame,
     TTSStoppedFrame,
     TextFrame,
@@ -27,8 +28,27 @@ from pipecat.utils.utils import exp_smoothing
 
 
 class AIService(FrameProcessor):
-    def __init__(self):
-        super().__init__()
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    async def start(self, frame: StartFrame):
+        pass
+
+    async def stop(self, frame: EndFrame):
+        pass
+
+    async def cancel(self, frame: CancelFrame):
+        pass
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, StartFrame):
+            await self.start(frame)
+        elif isinstance(frame, CancelFrame):
+            await self.cancel(frame)
+        elif isinstance(frame, EndFrame):
+            await self.stop(frame)
 
     async def process_generator(self, generator: AsyncGenerator[Frame, None]):
         async for f in generator:
@@ -41,8 +61,8 @@ class AIService(FrameProcessor):
 class LLMService(AIService):
     """This class is a no-op but serves as a base class for LLM services."""
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
         self._callbacks = {}
         self._start_callbacks = {}
 
@@ -71,8 +91,8 @@ class LLMService(AIService):
 
 
 class TTSService(AIService):
-    def __init__(self, aggregate_sentences: bool = True):
-        super().__init__()
+    def __init__(self, aggregate_sentences: bool = True, **kwargs):
+        super().__init__(**kwargs)
         self._aggregate_sentences: bool = aggregate_sentences
         self._current_sentence: str = ""
 
@@ -90,7 +110,9 @@ class TTSService(AIService):
             text = frame.text
         else:
             self._current_sentence += frame.text
-            if self._current_sentence.strip().endswith((".", "?", "!")):
+            if self._current_sentence.strip().endswith(
+                    (".", "?", "!")) and not self._current_sentence.strip().endswith(
+                    ("Mr,", "Mrs.", "Ms.", "Dr.")):
                 text = self._current_sentence.strip()
                 self._current_sentence = ""
 
@@ -106,6 +128,8 @@ class TTSService(AIService):
         await self.push_frame(TextFrame(text))
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         if isinstance(frame, TextFrame):
             await self._process_text_frame(frame)
         elif isinstance(frame, EndFrame):
@@ -124,8 +148,9 @@ class STTService(AIService):
                  max_silence_secs: float = 0.3,
                  max_buffer_secs: float = 1.5,
                  sample_rate: int = 16000,
-                 num_channels: int = 1):
-        super().__init__()
+                 num_channels: int = 1,
+                 **kwargs):
+        super().__init__(**kwargs)
         self._min_volume = min_volume
         self._max_silence_secs = max_silence_secs
         self._max_buffer_secs = max_buffer_secs
@@ -134,8 +159,8 @@ class STTService(AIService):
         (self._content, self._wave) = self._new_wave()
         self._silence_num_frames = 0
         # Volume exponential smoothing
-        self._smoothing_factor = 0.4
-        self._prev_volume = 1 - self._smoothing_factor
+        self._smoothing_factor = 0.2
+        self._prev_volume = 0
 
     @abstractmethod
     async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
@@ -179,6 +204,8 @@ class STTService(AIService):
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         """Processes a frame of audio data, either buffering or transcribing it."""
+        await super().process_frame(frame, direction)
+
         if isinstance(frame, CancelFrame) or isinstance(frame, EndFrame):
             self._wave.close()
             await self.push_frame(frame, direction)
@@ -192,8 +219,8 @@ class STTService(AIService):
 
 class ImageGenService(AIService):
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
 
     # Renders the image. Returns an Image object.
     @abstractmethod
@@ -201,6 +228,8 @@ class ImageGenService(AIService):
         pass
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         if isinstance(frame, TextFrame):
             await self.push_frame(frame, direction)
             await self.process_generator(self.run_image_gen(frame.text))
@@ -211,8 +240,8 @@ class ImageGenService(AIService):
 class VisionService(AIService):
     """VisionService is a base class for vision services."""
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
         self._describe_text = None
 
     @abstractmethod
@@ -220,6 +249,8 @@ class VisionService(AIService):
         pass
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         if isinstance(frame, VisionImageRawFrame):
             await self.process_generator(self.run_vision(frame))
         else:

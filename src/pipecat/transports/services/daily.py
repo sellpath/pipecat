@@ -27,6 +27,7 @@ from pipecat.frames.frames import (
     Frame,
     ImageRawFrame,
     InterimTranscriptionFrame,
+    MetricsFrame,
     SpriteFrame,
     StartFrame,
     TranscriptionFrame,
@@ -37,7 +38,7 @@ from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.transports.base_input import BaseInputTransport
 from pipecat.transports.base_output import BaseOutputTransport
 from pipecat.transports.base_transport import BaseTransport, TransportParams
-from pipecat.vad.vad_analyzer import VADAnalyzer, VADParams, VADState
+from pipecat.vad.vad_analyzer import VADAnalyzer, VADParams
 
 from loguru import logger
 
@@ -99,7 +100,7 @@ class DailyTranscriptionSettings(BaseModel):
 
 
 class DailyParams(TransportParams):
-    api_url: str = "https://api.daily.co"
+    api_url: str = "https://api.daily.co/v1"
     api_key: str = ""
     dialin_settings: DailyDialinSettings | None = None
     transcription_enabled: bool = False
@@ -193,7 +194,7 @@ class DailyTransportClient(EventHandler):
         num_channels = self._params.audio_in_channels
 
         if self._other_participant_has_joined:
-            num_frames = int(sample_rate / 100)  # 10ms of audio
+            num_frames = int(sample_rate / 100) * 2  # 20ms of audio
 
             audio = self._speaker.read_frames(num_frames)
 
@@ -346,6 +347,12 @@ class DailyTransportClient(EventHandler):
             self._client.release()
             self._client = None
 
+    def participants(self):
+        return self._client.participants()
+
+    def participant_counts(self):
+        return self._client.participant_counts()
+
     def start_dialout(self, settings):
         self._client.start_dialout(settings)
 
@@ -466,13 +473,12 @@ class DailyTransportClient(EventHandler):
 
 class DailyInputTransport(BaseInputTransport):
 
-    def __init__(self, client: DailyTransportClient, params: DailyParams):
-        super().__init__(params)
+    def __init__(self, client: DailyTransportClient, params: DailyParams, **kwargs):
+        super().__init__(params, **kwargs)
 
         self._client = client
 
         self._video_renderers = {}
-        self._camera_in_queue = queue.Queue()
 
         self._vad_analyzer: VADAnalyzer | None = params.vad_analyzer
         if params.vad_enabled and not params.vad_analyzer:
@@ -483,23 +489,26 @@ class DailyInputTransport(BaseInputTransport):
     async def start(self, frame: StartFrame):
         if self._running:
             return
+        # Parent start.
+        await super().start(frame)
         # Join the room.
         await self._client.join()
-        # This will set _running=True
-        await super().start(frame)
-        # Create camera in thread (runs if _running is true).
-        self._camera_in_thread = self._loop.run_in_executor(
-            self._in_executor, self._camera_in_thread_handler)
+        # Create audio task. It reads audio frames from Daily and push them
+        # internally for VAD processing.
+        if self._params.audio_in_enabled or self._params.vad_enabled:
+            self._audio_in_thread = self._loop.run_in_executor(
+                self._executor, self._audio_in_thread_handler)
 
     async def stop(self):
         if not self._running:
             return
+        # Parent stop. This will set _running to False.
+        await super().stop()
         # Leave the room.
         await self._client.leave()
-        # This will set _running=False
-        await super().stop()
-        # The thread will stop.
-        await self._camera_in_thread
+        # Stop audio thread.
+        if self._params.audio_in_enabled or self._params.vad_enabled:
+            await self._audio_in_thread
 
     async def cleanup(self):
         await super().cleanup()
@@ -508,18 +517,15 @@ class DailyInputTransport(BaseInputTransport):
     def vad_analyzer(self) -> VADAnalyzer | None:
         return self._vad_analyzer
 
-    def read_next_audio_frame(self) -> AudioRawFrame | None:
-        return self._client.read_next_audio_frame()
-
     #
     # FrameProcessor
     #
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
         if isinstance(frame, UserImageRequestFrame):
             self.request_participant_image(frame.user_id)
-
-        await super().process_frame(frame, direction)
 
     #
     # Frames
@@ -535,6 +541,16 @@ class DailyInputTransport(BaseInputTransport):
         future = asyncio.run_coroutine_threadsafe(
             self._internal_push_frame(frame), self.get_event_loop())
         future.result()
+
+    #
+    # Audio in
+    #
+
+    def _audio_in_thread_handler(self):
+        while self._running:
+            frame = self._client.read_next_audio_frame()
+            if frame:
+                self.push_audio_frame(frame)
 
     #
     # Camera in
@@ -584,35 +600,24 @@ class DailyInputTransport(BaseInputTransport):
                 image=buffer,
                 size=size,
                 format=format)
-            self._camera_in_queue.put(frame)
+            future = asyncio.run_coroutine_threadsafe(
+                self._internal_push_frame(frame), self.get_event_loop())
+            future.result()
 
         self._video_renderers[participant_id]["timestamp"] = curr_time
-
-    def _camera_in_thread_handler(self):
-        while self._running:
-            try:
-                frame = self._camera_in_queue.get(timeout=1)
-                future = asyncio.run_coroutine_threadsafe(
-                    self._internal_push_frame(frame), self.get_event_loop())
-                future.result()
-                self._camera_in_queue.task_done()
-            except queue.Empty:
-                pass
-            except BaseException as e:
-                logger.error(f"Error capturing video: {e}")
 
 
 class DailyOutputTransport(BaseOutputTransport):
 
-    def __init__(self, client: DailyTransportClient, params: DailyParams):
-        super().__init__(params)
+    def __init__(self, client: DailyTransportClient, params: DailyParams, **kwargs):
+        super().__init__(params, **kwargs)
 
         self._client = client
 
     async def start(self, frame: StartFrame):
         if self._running:
             return
-        # This will set _running=True
+        # Parent start.
         await super().start(frame)
         # Join the room.
         await self._client.join()
@@ -620,7 +625,7 @@ class DailyOutputTransport(BaseOutputTransport):
     async def stop(self):
         if not self._running:
             return
-        # This will set _running=False
+        # Parent stop. This will set _running to False.
         await super().stop()
         # Leave the room.
         await self._client.leave()
@@ -631,6 +636,16 @@ class DailyOutputTransport(BaseOutputTransport):
 
     def send_message(self, frame: DailyTransportMessageFrame):
         self._client.send_message(frame)
+
+    def send_metrics(self, frame: MetricsFrame):
+        ttfb = [{"name": n, "time": t} for n, t in frame.ttfb.items()]
+        message = DailyTransportMessageFrame(message={
+            "type": "pipecat-metrics",
+            "metrics": {
+                "ttfb": ttfb
+            },
+        })
+        self._client.send_message(message)
 
     def write_raw_audio_frames(self, frames: bytes):
         self._client.write_raw_audio_frames(frames)
@@ -647,8 +662,10 @@ class DailyTransport(BaseTransport):
             token: str | None,
             bot_name: str,
             params: DailyParams,
+            input_name: str | None = None,
+            output_name: str | None = None,
             loop: asyncio.AbstractEventLoop | None = None):
-        super().__init__(loop)
+        super().__init__(input_name=input_name, output_name=output_name, loop=loop)
 
         callbacks = DailyCallbacks(
             on_joined=self._on_joined,
@@ -693,19 +710,19 @@ class DailyTransport(BaseTransport):
 
     def input(self) -> FrameProcessor:
         if not self._input:
-            self._input = DailyInputTransport(self._client, self._params)
+            self._input = DailyInputTransport(self._client, self._params, name=self._input_name)
         return self._input
 
     def output(self) -> FrameProcessor:
         if not self._output:
-            self._output = DailyOutputTransport(self._client, self._params)
+            self._output = DailyOutputTransport(self._client, self._params, name=self._output_name)
         return self._output
 
     #
     # DailyTransport
     #
 
-    @property
+    @ property
     def participant_id(self) -> str:
         return self._client.participant_id
 
@@ -716,6 +733,12 @@ class DailyTransport(BaseTransport):
     async def send_audio(self, frame: AudioRawFrame):
         if self._output:
             await self._output.process_frame(frame, FrameDirection.DOWNSTREAM)
+
+    def participants(self):
+        return self._client.participants()
+
+    def participant_counts(self):
+        return self._client.participant_counts()
 
     def start_dialout(self, settings=None):
         self._client.start_dialout(settings)
@@ -771,7 +794,7 @@ class DailyTransport(BaseTransport):
         async with aiohttp.ClientSession() as session:
             headers = {
                 "Authorization": f"Bearer {self._params.api_key}",
-                "Content-Type": "application/x-www-form-urlencoded"
+                "Content-Type": "application/json"
             }
             data = {
                 "callId": self._params.dialin_settings.call_id,
@@ -782,7 +805,7 @@ class DailyTransport(BaseTransport):
             url = f"{self._params.api_url}/dialin/pinlessCallUpdate"
 
             try:
-                async with session.post(url, headers=headers, data=data, timeout=10) as r:
+                async with session.post(url, headers=headers, json=data, timeout=10) as r:
                     if r.status != 200:
                         text = await r.text()
                         logger.error(
