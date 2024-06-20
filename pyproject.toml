@@ -24,7 +24,7 @@ dependencies = [
     "numpy~=1.26.4",
     "loguru~=0.7.0",
     "Pillow~=10.3.0",
-    "protobuf~=4.25.3",
+    "protobuf~=5.26.1",
     "pyloudnorm~=0.1.1",
     "typing-extensions~=4.12.1",
 ]
