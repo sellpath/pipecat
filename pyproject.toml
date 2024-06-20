@@ -50,7 +50,7 @@ openai = [ "openai~=1.26.0" ]
 openpipe = [ "openpipe~=4.14.0" ]
 playht = [ "pyht~=0.0.28" ]
 #silero = [ "torch~=2.3.0+cpu", "torchaudio~=2.3.0+cpu" ]
-silero = [ "torch>=2.3.0+cpu,<2.4.0+cpu", "torchaudio>=2.3.0+cpu" ]
+silero = [ "torch >= 2.3.0+cpu, < 2.4.0+cpu", "torchaudio >= 2.3.0+cpu" ]
 websocket = [ "websockets~=12.0" ]
 whisper = [ "faster-whisper~=1.0.2" ]
 
